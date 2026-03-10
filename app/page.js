@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
 import { collection, addDoc, onSnapshot, serverTimestamp, doc, deleteDoc } from 'firebase/firestore';
-import { BookHeart, Loader2, Mic, Square, AlertCircle, MessageSquare, Sparkles, CheckCircle2, Trash2, Clock, CalendarDays } from 'lucide-react';
+import { BookHeart, Loader2, Mic, Square, AlertCircle, MessageSquare, Sparkles, CheckCircle2, Trash2, Clock, CalendarDays, UserRound } from 'lucide-react';
 import { auth, db } from '../lib/firebase';
 
 const SpeechRecognition = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -24,6 +24,9 @@ export default function App() {
   const [refinedText, setRefinedText] = useState("");
   const [tags, setTags] = useState([]);
   const [errorMsg, setErrorMsg] = useState("");
+
+  // 아빠/엄마 페르소나 선택 (기본값: 아빠)
+  const [role, setRole] = useState('아빠');
 
   // 상태 관리 (피드 데이터)
   const [diaries, setDiaries] = useState([]);
@@ -109,43 +112,95 @@ export default function App() {
     setStep('raw_done'); setInterimText('');
   };
 
-  // Gemini API 연동 (AI 윤문)
+  // Gemini API 연동 (AI 윤문) - 지수 백오프(Exponential Backoff) 안전장치 적용
   const processWithAI = async () => {
     if (!rawText.trim()) return;
     setStep('processing');
-    try {
-      const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || ""; 
-      const systemPrompt = `당신은 초중학생 자녀를 둔 따뜻하고 관조적인 성향의 부모를 위한 '다이어리 대필 작가'입니다.
-      아래의 거친 음성 메모를 3~4문장의 감동적이고 정돈된 에세이 톤으로 윤문해 주세요. 
-      그리고 글의 감정이나 상황을 나타내는 해시태그 2~3개를 반드시 제공해 주세요.`;
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents: [{ parts: [{ text: rawText }] }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: "OBJECT",
-              properties: { refined_text: { type: "STRING" }, emotion_tags: { type: "ARRAY", items: { type: "STRING" } } }
-            }
+    const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
+
+    // [프롬프트 강화] 페르소나 주입 + STT 오타 교정 지시
+    const systemPrompt = `당신은 초중학생 자녀를 둔 따뜻하고 관조적인 성향의 '${role}'입니다.
+    아래의 거친 음성 메모를 3~4문장의 감동적이고 정돈된 에세이 톤으로 윤문해 주세요.
+
+    [중요 지침]
+    1. 화자는 무조건 '${role}'입니다. 절대 다른 성별이나 역할로 지칭하지 마세요. (예: 아빠인데 엄마라고 쓰는 것 절대 금지)
+    2. 음성 인식(STT) 오류로 문맥에 안 맞는 엉뚱한 단어(오타)가 있어도, 전체 맥락을 찰떡같이 유추해서 교정해 주세요.
+    3. 글의 감정이나 상황을 나타내는 해시태그 2~3개를 반드시 제공해 주세요.`;
+
+    const payload = {
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ parts: [{ text: rawText }] }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            refined_text: { type: "STRING" },
+            emotion_tags: { type: "ARRAY", items: { type: "STRING" } },
+          },
+        },
+      },
+    };
+
+    // 최대 5회 재시도, 429(쿼터 초과) 발생 시 점점 길게 대기 (1→2→4→8→16초)
+    const maxRetries = 5;
+    const delays = [1000, 2000, 4000, 8000, 16000];
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
           }
-        })
-      });
+        );
 
-      const data = await response.json();
-      const resultText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (resultText) {
-        const parsed = JSON.parse(resultText);
-        setRefinedText(parsed.refined_text); setTags(parsed.emotion_tags); setStep('done');
-      } else throw new Error("AI 응답 비어있음");
-    } catch (error) {
-      console.error(error);
-      setErrorMsg("AI 처리 중 오류가 발생했습니다."); setStep('raw_done');
+        // 429(쿼터 초과) 발생 시: 유저에게 바로 에러를 보이지 않고 뒤에서 재시도
+        if (response.status === 429 && attempt < maxRetries) {
+          // 재시도 중임을 유저에게 자연스럽게 알림 (남은 시도 횟수 표시)
+          const remainingAttempts = maxRetries - attempt;
+          setErrorMsg(`잠시 사용량이 많아 재시도 중입니다... (${remainingAttempts}회 남음)`);
+          await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+          setErrorMsg(""); // 재시도 전 메시지 초기화
+          continue;
+        }
+
+        // 그 외 API 오류 처리 (404, 401 등)
+        if (!response.ok) {
+          const errData = await response.json();
+          console.error("Gemini API 오류 응답:", JSON.stringify(errData, null, 2));
+          throw new Error(errData.error?.message || `API 오류 (${response.status})`);
+        }
+
+        const data = await response.json();
+        const resultText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+        if (resultText) {
+          const parsed = JSON.parse(resultText);
+          setRefinedText(parsed.refined_text);
+          setTags(parsed.emotion_tags);
+          setStep("done");
+          return; // 성공 시 함수 종료
+        } else {
+          throw new Error("AI 응답이 비어있습니다.");
+        }
+      } catch (error) {
+        // 마지막 시도임에도 실패했을 때만 유저에게 에러 표시
+        if (attempt === maxRetries) {
+          console.error("AI 처리 최종 실패:", error);
+          setErrorMsg("일시적으로 사용량이 많습니다. 잠시 후 다시 시도해 주세요.");
+          setStep("raw_done");
+          return;
+        }
+        // 네트워크 에러 등 기타 에러 시에도 대기 후 재시도
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
     }
   };
+
 
   // [D+4 핵심] DB에 일기 저장하기
   const saveDiaryToDB = async () => {
@@ -157,6 +212,7 @@ export default function App() {
         rawText: rawText.trim(),
         refinedText: refinedText.trim(),
         tags: tags,
+        role: role, // 작성자 페르소나(아빠/엄마)도 함께 저장
         createdAt: serverTimestamp() // 안전한 서버 시간
       });
       // 저장 완료 후 상태 초기화 (메인 화면으로 복귀)
@@ -198,12 +254,36 @@ export default function App() {
             <BookHeart className="text-indigo-600 w-6 h-6" />
             <h1 className="text-xl font-bold bg-gradient-to-r from-indigo-600 to-purple-500 bg-clip-text text-transparent">Echoes</h1>
           </div>
-          {user && (
-            <div className="flex items-center gap-1.5 px-3 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold shadow-sm">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              ID: {user.uid.substring(0, 5)}...
-            </div>
-          )}
+          <div className="flex items-center gap-3">
+            {/* 아빠/엄마 페르소나 토글: idle 상태에서만 변경 가능 */}
+            {step === 'idle' && (
+              <div className="flex bg-slate-100 p-1 rounded-lg">
+                <button
+                  onClick={() => setRole('아빠')}
+                  className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${
+                    role === '아빠' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  👨 아빠
+                </button>
+                <button
+                  onClick={() => setRole('엄마')}
+                  className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${
+                    role === '엄마' ? 'bg-white shadow-sm text-rose-500' : 'text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  👩 엄마
+                </button>
+              </div>
+            )}
+            {/* 녹음/작성 중엔 연결 상태 표시 */}
+            {user && step !== 'idle' && (
+              <div className="flex items-center gap-1.5 px-3 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold shadow-sm">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                {role === '아빠' ? '👨' : '👩'} {user.uid.substring(0, 5)}...
+              </div>
+            )}
+          </div>
         </header>
 
         {/* 메인 콘텐츠 (작성 영역 + 피드 영역) */}
@@ -225,10 +305,31 @@ export default function App() {
               </div>
             )}
 
-            {(step !== 'idle' && rawText) && (
+            {/* 녹음 중: 일반 텍스트로 실시간 표시 */}
+            {step === 'recording' && rawText && (
               <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 mb-3 animate-in fade-in duration-300">
-                <h3 className="text-[10px] font-bold text-slate-400 mb-2 uppercase">원본 기록</h3>
+                <h3 className="text-[10px] font-bold text-slate-400 mb-2 uppercase">녹음 중...</h3>
                 <p className="text-sm text-slate-600 italic leading-relaxed">&quot;{rawText}<span className="text-indigo-400">{interimText}</span>&quot;</p>
+              </div>
+            )}
+
+            {/* 녹음 완료 후: 수정 가능한 textarea 제공 (STT 오타를 직접 고칠 수 있음) */}
+            {step === 'raw_done' && rawText && (
+              <div className="animate-in fade-in zoom-in duration-300 mb-3">
+                <h3 className="text-[10px] font-bold text-indigo-500 mb-2 uppercase">원본 기록 (오타가 있다면 수정 후 다듬기를 눌러주세요)</h3>
+                <textarea
+                  value={rawText}
+                  onChange={(e) => setRawText(e.target.value)}
+                  className="w-full bg-indigo-50/30 p-4 rounded-xl border border-indigo-100 text-sm text-slate-700 italic leading-relaxed focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none min-h-[100px]"
+                />
+              </div>
+            )}
+
+            {/* processing/saving/done 단계: 원본 텍스트는 읽기 전용으로 표시 */}
+            {(step === 'processing' || step === 'saving' || step === 'done') && rawText && (
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 mb-3">
+                <h3 className="text-[10px] font-bold text-slate-400 mb-2 uppercase">원본 기록</h3>
+                <p className="text-sm text-slate-600 italic leading-relaxed">&quot;{rawText}&quot;</p>
               </div>
             )}
 
@@ -280,6 +381,12 @@ export default function App() {
                   <div key={diary.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 group transition-all hover:shadow-md">
                     <div className="flex justify-between items-start mb-3">
                       <div className="flex items-center gap-1.5 text-slate-400">
+                        <UserRound className="w-3.5 h-3.5" />
+                        {/* 역할 배지: 저장 시 기록된 아빠/엄마 페르소나 표시 */}
+                        <span className={`text-[11px] font-bold ${
+                          diary.role === '엄마' ? 'text-rose-400' : 'text-indigo-400'
+                        }`}>{diary.role || '작성자'}</span>
+                        <span className="text-slate-200 mx-0.5">•</span>
                         <Clock className="w-3.5 h-3.5" />
                         <span className="text-[11px] font-semibold">{formatDate(diary.createdAt)}</span>
                       </div>
