@@ -5,6 +5,15 @@ import { collection, addDoc, onSnapshot, serverTimestamp, doc, deleteDoc } from 
 import { BookHeart, Loader2, Mic, Square, AlertCircle, MessageSquare, Sparkles, CheckCircle2, Trash2, Clock, CalendarDays, UserRound } from 'lucide-react';
 import { auth, db } from '../lib/firebase';
 
+// 오늘의 질문 목록 — 유저가 마이크를 누르도록 유도하는 프롬프트 스타터
+const PROMPT_STARTERS = [
+  "오늘 아이가 가장 밝게 웃었던 순간은 언제인가요?",
+  "오늘 아이가 나에게 한 말 중 가장 기억에 남는 한 마디는?",
+  "오늘 문득, 아이가 '정말 많이 컸구나'라고 느낀 순간이 있었나요?",
+  "오늘 아이의 뒷모습을 보며 어떤 생각이 들었나요?",
+  "잠든 아이의 얼굴을 본다면, 지금 당장 해주고 싶은 말은?"
+];
+
 const SpeechRecognition = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
 const recognition = SpeechRecognition ? new SpeechRecognition() : null;
 if (recognition) {
@@ -28,6 +37,9 @@ export default function App() {
   // 아빠/엄마 페르소나 선택 (기본값: 아빠)
   const [role, setRole] = useState('아빠');
 
+  // 오늘의 랜덤 질문 상태
+  const [todayPrompt, setTodayPrompt] = useState("");
+
   // 상태 관리 (피드 데이터)
   const [diaries, setDiaries] = useState([]);
   const [feedLoading, setFeedLoading] = useState(true);
@@ -48,6 +60,9 @@ export default function App() {
         setLoading(false);
       }
     };
+    // 앱 시작 시 오늘의 질문을 랜덤으로 하나 선택
+    const randomPrompt = PROMPT_STARTERS[Math.floor(Math.random() * PROMPT_STARTERS.length)];
+    setTodayPrompt(randomPrompt);
     initAuth();
     const unsubscribe = onAuthStateChanged(auth, setUser);
     return () => unsubscribe();
@@ -300,8 +315,9 @@ export default function App() {
             {step === 'idle' && (
               <div className="py-8 flex flex-col items-center justify-center text-center opacity-80">
                 <MessageSquare className="w-12 h-12 text-slate-300 mb-3" />
-                <h2 className="text-base font-semibold text-slate-700">오늘의 감정을 남겨주세요</h2>
-                <p className="text-xs text-slate-400 mt-1">하단의 마이크를 눌러 편하게 말씀해 보세요.</p>
+                {/* 오늘의 질문: 앱 실행 시 랜덤으로 선택된 감성 프롬프트 */}
+                <h2 className="text-base font-semibold text-slate-700">{todayPrompt}</h2>
+                <p className="text-xs text-slate-400 mt-2">하단의 마이크를 눌러 편하게 말씀해 보세요.</p>
               </div>
             )}
 
